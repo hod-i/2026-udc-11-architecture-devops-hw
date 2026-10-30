@@ -2,7 +2,7 @@
 
 Для чергового, який цього класу інцидентів ще не бачив. Команди — на VM `poshtomat-prod-1`.
 Штатний деплой (`pipeline/deploy.yml`) кладе `compose.yaml` і `.env` у `/opt/poshtomat`
-(`pipeline/deploy.yml:32`, `:157`, `:172-173`), тож усі команди `docker compose` нижче
+(`pipeline/deploy.yml:34`, `:164`, `:187-188`), тож усі команди `docker compose` нижче
 вказують цей файл явно: `-f /opt/poshtomat/compose.yaml` (`.env` з тієї ж теки compose
 підхоплює сам). Коду репо на VM немає — образ приходить з реєстру.
 
@@ -19,17 +19,22 @@
 1. Напишіть у #poshtomat-oncall: «взяв(ла) `<алерт>`, дивлюсь».
 2. **Чи був деплой за останню годину?** Джерело правди — історія запусків workflow `deploy`
    (GitHub → Actions → `deploy`): час кожного успішного job `deploy` і його коміт. Вона не
-   зникає, коли деплой замінює контейнер, тож на логи старого контейнера покладатися не треба.
-   На VM те саме видно з поточного контейнера:
+   зникає, коли деплой замінює контейнер. **Є успішний запуск менш ніж годину тому, і алерт
+   почався після нього → одразу відкат** (розділ «Що робити», перший рядок), діагностика —
+   потім. Немає → крок 3.
+   На VM звірте, що працює саме версія з цього запуску:
    ```bash
    ssh poshtomat-prod-1
    docker inspect --format '{{.Created}} {{index .Config.Labels "org.opencontainers.image.revision"}}' $(docker compose -f /opt/poshtomat/compose.yaml ps -q api)
    ```
-   Перше поле — коли контейнер `api` створено: деплой його перестворює, а перезапуск
-   (`restart`, падіння процесу) — ні. Друге — коміт, з якого зібрано образ (мітку ставить CI,
-   `pipeline/deploy.yml:89`). Контейнер створено за останню годину, а алерт почався після
-   цього → **одразу відкат** (розділ «Що робити», перший рядок), діагностика — потім.
-   Ні → крок 3.
+   Друге поле — коміт, з якого зібрано образ (мітку ставить CI, `pipeline/deploy.yml:96`); він
+   має збігатися з комітом запуску. Перше — коли контейнер `api` створено. **Сам по собі цей
+   час деплою не доводить:** контейнер перестворює і ручна зміна `compose.yaml` з
+   `docker compose up -d`. Контейнер свіжий, а успішного запуску `deploy` за годину немає → це
+   ручна зміна на VM, а не деплой: відкат не робіть, спитайте в #poshtomat-oncall, хто міняв
+   конфіг, і переходьте до кроку 3 (див. також «Що робити», рядок про ручні зміни). Якщо GitHub
+   недоступний, ознака деплою на VM — свіжий `image.previous`: його пише лише успішний CI-деплой
+   (`ls -l /opt/poshtomat/image.previous`).
 3. Відкрийте дашборд моніторингу і подивіться останні 30 хв: `rps`, `p95_ms`, `error_rate`,
    `db_pool_in_use`, `db_pool_waiting`. Далі — «Діагностика».
 4. Не починайте з `SmsProvider429RateHigh`, `heap usage high` чи поодиноких
@@ -60,9 +65,9 @@ timeout after 2000ms`; (2) `db_pool_in_use` стоїть рівним число
 
 | Ситуація | Дія | Команда | Ризик / що перевірити після |
 |---|---|---|---|
-| Алерт почався після деплою за останню годину | Відкат на попередню версію | GitHub → Actions → workflow `deploy`. Знайдіть запуск, чий коміт збігається з `revision` з кроку 2, — це поточний. Візьміть **попередній успішний** запуск під ним і натисніть **Re-run** job `deploy` (`pipeline/deploy.yml:19-20`: він розгорне образ того запуску за дайджестом; потрібне погодження в environment `production`). Запишіть його коміт | Через 2–3 хв `p95_ms` < 500 і `error_rate` < 0.01. Команда з кроку 2 показує новий час створення і `revision` = коміт запуску, який ви перезапустили. Напишіть автору релізу |
-| Відкат через CI неможливий: нікому погодити environment `production` (увімкнено «Prevent self-review», `pipeline/deploy.yml:7`, а вночі чергує одна людина) або GitHub недоступний | Ручний відкат образу: повернути попередній дайджест у `POSHTOMAT_IMAGE` у `.env` і заново розгорнути compose | 1. Поточний образ: `sudo grep POSHTOMAT_IMAGE /opt/poshtomat/.env`.<br>2. Попередній образ серед локальних: `docker image ls --digests --format '{{.CreatedAt}}  {{.Repository}}@{{.Digest}}' \| grep poshtomat` і для кандидата — `docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' <repo@sha256:…>` (коміт має збігатися з попереднім успішним запуском `deploy` у GitHub Actions).<br>3. `sudo cp /opt/poshtomat/.env /opt/poshtomat/.env.bak`, потім `sudo sed -i "s\|^POSHTOMAT_IMAGE=.*\|POSHTOMAT_IMAGE='<repo@sha256:…>'\|" /opt/poshtomat/.env` (формат рядка — як пише деплой, `pipeline/deploy.yml:153`).<br>4. `docker compose -f /opt/poshtomat/compose.yaml up -d --wait` | Повертає **лише образ**: `compose.yaml` на VM лишається від поточного деплою — CI-відкат бере його з коміту того запуску (`pipeline/deploy.yml:114`), а ручний ні. Якщо деплой змінював `compose.yaml` (як 14.10), поверніть і його: вміст `deploy/compose.yaml` з попереднього коміту → `/opt/poshtomat/compose.yaml`. Образ має бути на VM: після деплою VM виходить з реєстру (`:182`), а локально лишаються образи, зібрані до 7 днів тому (`:177`). Перевірка — команда з кроку 2. Наступний деплой перезапише `.env` |
-| `dbPoolMax` не 20, а деплою не було (хтось змінював `compose.yaml` на VM вручну) | Повернути `DB_POOL_MAX: "20"` в `environment:` api і worker | відредагуйте `/opt/poshtomat/compose.yaml`, потім `docker compose -f /opt/poshtomat/compose.yaml up -d api worker` | Перевірте командою «Який пул насправді…». Наступний деплой перезапише файл на VM версією з репо (`pipeline/deploy.yml:157`, `:172`) — виправлення має бути і в `deploy/compose.yaml` у репо |
+| Алерт почався після деплою за останню годину | Відкат на попередню версію | GitHub → Actions → workflow `deploy`. Знайдіть запуск, чий коміт збігається з `revision` з кроку 2, — це поточний. Візьміть **попередній успішний** запуск під ним і натисніть **Re-run** job `deploy` (`pipeline/deploy.yml:19-20`: він розгорне образ того запуску за дайджестом; потрібне погодження в environment `production`). Запишіть його коміт.<br>**Якщо цей запуск старший за 30 днів**, GitHub не дасть його перезапустити. Тоді затверджений шлях — звичайний деплой: PR з `git revert` проблемного коміту в `main` → рев'ю → пайплайн `deploy` з погодженням у `production`. Запишіть коміт revert. Якщо так зробити не можна (вночі, ніхто не погодить), а попередній деплой був на VM — ручний відкат з наступного рядка | Через 2–3 хв `p95_ms` < 500 і `error_rate` < 0.01. Команда з кроку 2 показує новий час створення і `revision` = записаний коміт (перезапущеного запуску або revert). Напишіть автору релізу |
+| Відкат через CI неможливий: нікому погодити environment `production` (увімкнено «Prevent self-review», `pipeline/deploy.yml:7`, а вночі чергує одна людина), GitHub недоступний або попередній запуск старший за 30 днів | Ручний відкат на попередній успішний деплой **лише з локальних файлів на VM**. Кожен успішний CI-деплой лишає там `compose.yaml.previous` (його compose) і `image.previous` (дайджест його образу, без секретів), а сам образ тегує `poshtomat-rollback:previous`, щоб його не видалило очищення | 1. `cd /opt/poshtomat && sudo ls -l compose.yaml.previous image.previous && sudo cat image.previous` — обидва файли мають бути; немає → ескалюйте.<br>2. Збережіть поточний стан для розбору: `sudo cp -p compose.yaml compose.yaml.bad && sudo cp -p .env .env.bad`.<br>3. Поверніть попередній compose: `sudo cp -p compose.yaml.previous compose.yaml`.<br>4. Поверніть попередній образ, секрети лишаються поточні: `sudo sed -i "s\|^POSHTOMAT_IMAGE=.*\|POSHTOMAT_IMAGE='$(sudo cat image.previous)'\|" .env`.<br>5. `docker compose -f /opt/poshtomat/compose.yaml up -d --wait` | **Лише один крок назад** — до деплою, після якого з'явилися ці файли. Секрети (`DATABASE_URL`, `SMS_TOKEN`) беруться з поточного `.env`. Файли з'являються лише після першого успішного деплою з цим workflow.<br>**Перевірка:** `revision` з команди кроку 2 = `docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' poshtomat-rollback:previous`; через 2–3 хв `p95_ms` < 500 і `error_rate` < 0.01.<br>Наступний CI-деплой перезапише файли на VM. Запишіть у #poshtomat-oncall, що й о котрій відкотили; постійне виправлення — через PR |
+| `dbPoolMax` не 20, а деплою не було (хтось змінював `compose.yaml` на VM вручну) | Повернути `DB_POOL_MAX: "20"` в `environment:` api і worker | відредагуйте `/opt/poshtomat/compose.yaml`, потім `docker compose -f /opt/poshtomat/compose.yaml up -d api worker` | Перевірте командою «Який пул насправді…». Наступний деплой перезапише файл на VM версією з репо (`pipeline/deploy.yml:164`, `:187`) — виправлення має бути і в `deploy/compose.yaml` у репо |
 | Пул 20, `db_pool_waiting` > 0, rps значно вищий, ніж учора | Перевантаження — тимчасово підняти пул (запас є: PostgreSQL на тій самій VM) | `DB_POOL_MAX: "30"` у `/opt/poshtomat/compose.yaml`, потім `docker compose -f /opt/poshtomat/compose.yaml up -d api` | Слідкуйте за CPU/пам'яттю VM (2 vCPU / 4 GB); ескалюйте розробнику. Зміна тимчасова: наступний деплой поверне значення з `deploy/compose.yaml` у репо |
 | `500` з однією помилкою після деплою | Відкат, як у першому рядку | див. перший рядок | Заведіть баг з текстом помилки з логу |
 | Перезапуск «на всяк випадок» | **Не допоможе**, якщо причина в конфігу чи коді — перезапуститься те саме | — | 14.10 перезапуск о 14:20 нічого не змінив (`docs/rca.md`, доказ 19) |

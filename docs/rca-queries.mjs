@@ -106,10 +106,24 @@ const commands = {
     const readByApp = new Set([...read("app/src/config.js").matchAll(/env\.([A-Z_]+)/g)].map((m) => m[1]));
     const keep = { old: /^[- ]/, new: /^[+ ]/ }[side];
     const set = new Set();
+    let envIndent = null; // inside an `environment:` block: the indent of that key
     for (const raw of read(file).split("\n")) {
       if (keep && !keep.test(raw)) continue;
-      const m = /^\s+([A-Z][A-Z0-9_]+):/.exec(keep ? raw.slice(1) : raw);
-      if (m) set.add(m[1]);
+      const line = keep ? raw.slice(1) : raw;
+      const indent = line.search(/\S/);
+      if (indent === -1) continue;
+      if (envIndent !== null && indent <= envIndent) envIndent = null;
+      if (/^\s*environment:\s*$/.test(line)) {
+        envIndent = indent;
+        continue;
+      }
+      // map form anywhere (also YAML anchors like x-db-env): `  NAME: value`
+      const map = /^\s+([A-Z][A-Z0-9_]+):/.exec(line);
+      // list form: `- NAME=value` anywhere; a bare `- NAME` only inside environment:
+      // (elsewhere it may be e.g. `cap_drop: [ALL]` written as a list)
+      const list = /^\s+-\s+["']?([A-Z][A-Z0-9_]*)(=|["']?\s*$)/.exec(line);
+      if (map) set.add(map[1]);
+      else if (list && (list[2] === "=" || envIndent !== null)) set.add(list[1]);
     }
     const unread = [...set].filter((k) => !readByApp.has(k) && k !== "TZ");
     console.log(`read by app/src/config.js: ${[...readByApp].join(", ")}`);

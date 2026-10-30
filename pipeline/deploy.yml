@@ -18,7 +18,8 @@
 #
 # Відкат: Re-run job deploy у попередньому успішному запуску. Він розгорне образ,
 # зібраний у тому запуску (за дайджестом). Якщо новий стек не пройде healthcheck, крок
-# Deploy сам поверне попередні compose.yaml і .env, а job завершиться помилкою.
+# Deploy сам поверне попередні compose.yaml і .env, а job завершиться помилкою. Після
+# успіху на VM лишаються compose.yaml.previous і image.previous — для ручного відкату.
 name: deploy
 
 on:
@@ -202,7 +203,15 @@ jobs:
             fi
             exit 1
           fi
-          rm -f compose.yaml.prev .env.prev
+          # Попередній успішний деплой лишаємо на VM для ручного відкату без GitHub
+          # (docs/runbook.md): його compose.yaml і дайджест образу — окремим файлом, без
+          # секретів. Тег захищає образ від prune нижче (той видаляє лише образи без тегу).
+          if [ "$had_prev" = true ]; then
+            mv compose.yaml.prev compose.yaml.previous
+            sed -n "s/^POSHTOMAT_IMAGE='\(.*\)'$/\1/p" .env.prev > image.previous
+            docker tag "$(cat image.previous)" poshtomat-rollback:previous
+          fi
+          rm -f .env.prev
           docker compose ps
           docker image prune -f --filter "until=168h"
           EOF

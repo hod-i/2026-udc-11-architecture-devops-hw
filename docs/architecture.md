@@ -14,8 +14,8 @@
     продакшні за інтерфейсом — спільна PostgreSQL на тій самій VM, — відомо лише з коментаря
     «in production the same interface sits on PostgreSQL» (`app/src/db.js:1`), документації
     (`app/docs/ARCHITECTURE.md:20`) і конфігу деплою (`deploy/compose.yaml:1`).
-  - **Хто опитує `/health`** (стрілки 6, 13): у коді є лише ендпоінт, «моніторинг» — з
-    `app/docs/ARCHITECTURE.md:17`.
+  - **Хто опитує `/health`** (стрілки 6, 13 з міткою «HTTP — production-припущення»): у коді є
+    лише ендпоінт, «моніторинг» — з `app/docs/ARCHITECTURE.md:17`.
 
 ## Рівень 1 — System Context
 
@@ -40,7 +40,7 @@ C4Context
   Rel(resident, locker, "3. Вводить 6-значний код")
   Rel(locker, poshtomat, "4. Перевіряє код, видає посилку", "JSON/HTTP")
   Rel(staff, poshtomat, "5. Переглядає посилки", "JSON/HTTP, Bearer-сесія")
-  Rel(monitoring, poshtomat, "6. Health-check", "HTTP")
+  Rel(monitoring, poshtomat, "6. Health-check", "HTTP — production-припущення")
   Rel(poshtomat, sms, "7. SMS про прибуття", "JSON/HTTP, Bearer-токен")
   Rel(sms, resident, "8. SMS з номером поштомата і кодом", "SMS")
   Rel(poshtomat, courierApi, "9. Заявка на повернення", "JSON/HTTP")
@@ -74,7 +74,7 @@ C4Container
   Rel(scanner, api, "10. POST /parcels", "JSON/HTTP")
   Rel(locker, api, "11. POST /pickup", "JSON/HTTP")
   Rel(staff, api, "12. GET /admin/parcels", "JSON/HTTP, Bearer-сесія")
-  Rel(monitoring, api, "13. GET /health", "HTTP")
+  Rel(monitoring, api, "13. GET /health", "HTTP — production-припущення")
   Rel(api, db, "14. Посилки, коди, події, сесії", "SQL — production-припущення; пул з'єднань")
   Rel(worker, db, "15. Посилки без сповіщення, notifiedAt", "SQL — production-припущення")
   Rel(worker, sms, "16. Надсилає SMS", "JSON/HTTP, Bearer SMS_TOKEN")
@@ -102,14 +102,14 @@ worker лише опитує сховище (`app/src/worker.js:24`). Що це 
 | 3 | Мешканець → Екран: вводить 6-значний код | `app/src/parcels.js:58` («the code the person typed»), `:60` (`/^\d{6}$/`) | є — але підпис «Вводить 4-значний код» хибний | є |
 | 4 | Екран → Поштомат: перевіряє код і видає посилку, JSON/HTTP | `app/src/server.js:42-45`, `app/src/parcels.js:58-68` | є | є |
 | 5 | Персонал → Поштомат: список посилок, Bearer-сесія | `app/src/server.js:13-19`, `:47-49`, `app/src/parcels.js:71-75` | є | є |
-| 6 | Моніторинг → Поштомат: health-check, HTTP | `app/src/server.js:37` (ендпоінт); хто його опитує — лише `app/docs/ARCHITECTURE.md:17` | є | є |
+| 6 | Моніторинг → Поштомат: health-check, HTTP. **Хто опитує — production-припущення** | Ендпоінт: `app/src/server.js:37`. Що його опитує моніторинг — лише `app/docs/ARCHITECTURE.md:17` | є | є |
 | 7 | Поштомат → SMS-провайдер: SMS про прибуття, JSON/HTTP, Bearer | `app/src/worker.js:28`, `app/src/sms.js:31-34` | є | є |
 | 8 | SMS-провайдер → Мешканець: SMS з номером поштомата і кодом | `app/src/worker.js:11-13` | є | є |
 | 9 | Поштомат → API повернень служби доставки: заявка на повернення | `app/bin/expire-parcels.js:15`, `app/src/courier.js:7-15` | **пропустив** — у документації цієї зовнішньої системи немає | є |
 | 10 | Сканер → API: `POST /parcels` | `app/src/server.js:38-40` | є | є |
 | 11 | Екран → API: `POST /pickup` | `app/src/server.js:42-45` | є | є |
 | 12 | Персонал → API: `GET /admin/parcels`, Bearer-сесія | `app/src/server.js:16`, `:47-49` | є | є |
-| 13 | Моніторинг → API: `GET /health` | `app/src/server.js:37`; хто опитує — `app/docs/ARCHITECTURE.md:17` | є | є |
+| 13 | Моніторинг → API: `GET /health`. **Хто опитує — production-припущення** | Ендпоінт: `app/src/server.js:37`. Що його опитує моніторинг — лише `app/docs/ARCHITECTURE.md:17` | є | є |
 | 14 | API → сховище: посилки, коди, події, сесії. **Що сховище — PostgreSQL по SQL — production-припущення** | Виклики сховища: `app/src/parcels.js:43-54`, `:61-67`, `:74`; `app/src/server.js:18`. PostgreSQL — лише `app/src/db.js:1` (коментар), `app/docs/ARCHITECTURE.md:20`, `deploy/compose.yaml:1` | є | є |
 | 15 | Worker → сховище: посилки без сповіщення, ставить `notifiedAt`. **PostgreSQL — production-припущення** | Виклики сховища: `app/src/worker.js:24`, `:33`. PostgreSQL — як у рядку 14: `app/src/db.js:1`, `app/docs/ARCHITECTURE.md:20` | є | є |
 | 16 | Worker → SMS-провайдер: `POST {SMS_BASE_URL}/messages`, Bearer `SMS_TOKEN`, до 5/с, на 429 до 4 спроб | `app/src/worker.js:28`, `:44-49`; `app/src/sms.js:10`, `:14`, `:31-41`; `smsBaseUrl` у коді використовує лише worker (`app/src/worker.js:45`) | є | є |
