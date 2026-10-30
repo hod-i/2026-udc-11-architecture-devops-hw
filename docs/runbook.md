@@ -1,8 +1,10 @@
 # Runbook: API повільний або віддає 5xx (`ApiLatencyP95High`, `Api5xxRateHigh`)
 
-Для чергового, який цього класу інцидентів ще не бачив. Команди — на VM
-`poshtomat-prod-1` з теки, де лежить `deploy/compose.yaml` (як у
-`docs/ops/backup-runbook.md`).
+Для чергового, який цього класу інцидентів ще не бачив. Команди — на VM `poshtomat-prod-1`.
+Штатний деплой (`pipeline/deploy.yml`) кладе `compose.yaml` і `.env` у `/opt/poshtomat`
+(`pipeline/deploy.yml:32`, `:157`, `:172-173`), тож усі команди `docker compose` нижче
+вказують цей файл явно: `-f /opt/poshtomat/compose.yaml` (`.env` з тієї ж теки compose
+підхоплює сам). Коду репо на VM немає — образ приходить з реєстру.
 
 - **Алерт(и):** `ApiLatencyP95High` — `p95_ms > 2000 протягом 3 хв`; `Api5xxRateHigh` —
   `error_rate > 0.05 протягом 3 хв` (обидва — page).
@@ -15,13 +17,19 @@
 ## Перші 5 хвилин
 
 1. Напишіть у #poshtomat-oncall: «взяв(ла) `<алерт>`, дивлюсь».
-2. **Чи був деплой за останню годину?**
+2. **Чи був деплой за останню годину?** Джерело правди — історія запусків workflow `deploy`
+   (GitHub → Actions → `deploy`): час кожного успішного job `deploy` і його коміт. Вона не
+   зникає, коли деплой замінює контейнер, тож на логи старого контейнера покладатися не треба.
+   На VM те саме видно з поточного контейнера:
    ```bash
    ssh poshtomat-prod-1
-   docker compose -f deploy/compose.yaml logs --since 60m api | grep '"service started"'
+   docker inspect --format '{{.Created}} {{index .Config.Labels "org.opencontainers.image.revision"}}' $(docker compose -f /opt/poshtomat/compose.yaml ps -q api)
    ```
-   Є рядок `service started` з новою `version` і алерт почався після нього → **одразу
-   відкат** (розділ «Що робити», перший рядок), діагностика — потім. Немає → крок 3.
+   Перше поле — коли контейнер `api` створено: деплой його перестворює, а перезапуск
+   (`restart`, падіння процесу) — ні. Друге — коміт, з якого зібрано образ (мітку ставить CI,
+   `pipeline/deploy.yml:89`). Контейнер створено за останню годину, а алерт почався після
+   цього → **одразу відкат** (розділ «Що робити», перший рядок), діагностика — потім.
+   Ні → крок 3.
 3. Відкрийте дашборд моніторингу і подивіться останні 30 хв: `rps`, `p95_ms`, `error_rate`,
    `db_pool_in_use`, `db_pool_waiting`. Далі — «Діагностика».
 4. Не починайте з `SmsProvider429RateHigh`, `heap usage high` чи поодиноких
@@ -32,10 +40,10 @@
 
 | Питання | Команда | Як читати результат |
 |---|---|---|
-| Що саме за помилки віддає API? | `docker compose -f deploy/compose.yaml logs --since 15m api \| grep '"request failed"' \| grep -o '"status":[0-9]*,"ms":[0-9]*,"error":"[^"]*"' \| sed 's/"ms":[0-9]*,//' \| sort \| uniq -c \| sort -rn` | Переважає `503 … db pool wait timeout` → проблема з пулом БД, далі рядок нижче. `500` з однією й тією самою помилкою → баг у коді, дивіться останній деплой. Інше → ескалюйте |
+| Що саме за помилки віддає API? | `docker compose -f /opt/poshtomat/compose.yaml logs --since 15m api \| grep '"request failed"' \| grep -o '"status":[0-9]*,"ms":[0-9]*,"error":"[^"]*"' \| sed 's/"ms":[0-9]*,//' \| sort \| uniq -c \| sort -rn` | Переважає `503 … db pool wait timeout` → проблема з пулом БД, далі рядок нижче. `500` з однією й тією самою помилкою → баг у коді, дивіться останній деплой. Інше → ескалюйте |
 | Пул БД упирається в стелю? | дашборд: `db_pool_in_use` і `db_pool_waiting` | `db_pool_in_use` стоїть рівним числом, а `db_pool_waiting` > 0 → пулу не вистачає. Порівняйте зі звичайним днем: удень зайнято 10–13 з'єднань при пулі 20 |
-| Який пул насправді у процесі API? | `docker compose -f deploy/compose.yaml exec api node --input-type=module -e "import { loadConfig } from './src/config.js'; const c = loadConfig(); console.log('dbPoolMax', c.dbPoolMax, 'dbPoolWaitMs', c.dbPoolWaitMs)"` | Має бути `dbPoolMax 20`. `4` — це значення за замовчуванням: змінна `DB_POOL_MAX` не дійшла до процесу |
-| Які змінні пулу задано контейнеру? | `docker compose -f deploy/compose.yaml exec api printenv \| grep -i pool` | Має бути `DB_POOL_MAX=20`. Інша назва (наприклад, `DB_POOL_SIZE`) застосунок не читає — це і є причина |
+| Який пул насправді у процесі API? | `docker compose -f /opt/poshtomat/compose.yaml exec api node --input-type=module -e "import { loadConfig } from './src/config.js'; const c = loadConfig(); console.log('dbPoolMax', c.dbPoolMax, 'dbPoolWaitMs', c.dbPoolWaitMs)"` | Має бути `dbPoolMax 20`. `4` — це значення за замовчуванням: змінна `DB_POOL_MAX` не дійшла до процесу |
+| Які змінні пулу задано контейнеру? | `docker compose -f /opt/poshtomat/compose.yaml exec api printenv \| grep -i pool` | Має бути `DB_POOL_MAX=20`. Інша назва (наприклад, `DB_POOL_SIZE`) застосунок не читає — це і є причина |
 | Може, просто зріс трафік? | дашборд: `rps` зараз проти того самого часу вчора | Удень нормально ~11–12 rps. Якщо rps такий самий, як учора, а помилок учора не було — справа не в навантаженні |
 | БД жива? | `sudo -u postgres psql -d poshtomat -c 'select 1'` | `1` → БД відповідає, шукайте в застосунку. Помилка/зависання → ескалюйте розробнику інфраструктури |
 | Чи не вікно бекапу? | годинник: 02:00–02:30 за Києвом | У це вікно БД блокує записи (`docs/ops/backup-runbook.md:10-11`) — помилки на записі очікувані, зникнуть після 02:30 |
@@ -52,11 +60,12 @@ timeout after 2000ms`; (2) `db_pool_in_use` стоїть рівним число
 
 | Ситуація | Дія | Команда | Ризик / що перевірити після |
 |---|---|---|---|
-| Алерт почався після деплою за останню годину | Відкат на попередню версію | `git checkout <попередній тег>` у теці репо на VM, потім `docker compose -f deploy/compose.yaml up -d --build` (припущення: релізи позначено тегами; версію беріть з попереднього `service started`) | Через 2–3 хв `p95_ms` < 500 і `error_rate` < 0.01; у лозі `service started` зі старою версією. Напишіть автору релізу |
-| `dbPoolMax` не 20, а деплою не було (хтось змінював `compose.yaml` вручну) | Повернути `DB_POOL_MAX: "20"` в `environment:` api і worker | відредагуйте `deploy/compose.yaml`, потім `docker compose -f deploy/compose.yaml up -d api worker` | Перевірте командою «Який пул насправді…»; зафіксуйте зміну в git |
-| Пул 20, `db_pool_waiting` > 0, rps значно вищий, ніж учора | Перевантаження — тимчасово підняти пул (запас є: PostgreSQL на тій самій VM) | `DB_POOL_MAX: "30"` у `deploy/compose.yaml`, потім `docker compose -f deploy/compose.yaml up -d api` | Слідкуйте за CPU/пам'яттю VM (2 vCPU / 4 GB); ескалюйте розробнику |
+| Алерт почався після деплою за останню годину | Відкат на попередню версію | GitHub → Actions → workflow `deploy`. Знайдіть запуск, чий коміт збігається з `revision` з кроку 2, — це поточний. Візьміть **попередній успішний** запуск під ним і натисніть **Re-run** job `deploy` (`pipeline/deploy.yml:19-20`: він розгорне образ того запуску за дайджестом; потрібне погодження в environment `production`). Запишіть його коміт | Через 2–3 хв `p95_ms` < 500 і `error_rate` < 0.01. Команда з кроку 2 показує новий час створення і `revision` = коміт запуску, який ви перезапустили. Напишіть автору релізу |
+| Відкат через CI неможливий: нікому погодити environment `production` (увімкнено «Prevent self-review», `pipeline/deploy.yml:7`, а вночі чергує одна людина) або GitHub недоступний | Ручний відкат образу: повернути попередній дайджест у `POSHTOMAT_IMAGE` у `.env` і заново розгорнути compose | 1. Поточний образ: `sudo grep POSHTOMAT_IMAGE /opt/poshtomat/.env`.<br>2. Попередній образ серед локальних: `docker image ls --digests --format '{{.CreatedAt}}  {{.Repository}}@{{.Digest}}' \| grep poshtomat` і для кандидата — `docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' <repo@sha256:…>` (коміт має збігатися з попереднім успішним запуском `deploy` у GitHub Actions).<br>3. `sudo cp /opt/poshtomat/.env /opt/poshtomat/.env.bak`, потім `sudo sed -i "s\|^POSHTOMAT_IMAGE=.*\|POSHTOMAT_IMAGE='<repo@sha256:…>'\|" /opt/poshtomat/.env` (формат рядка — як пише деплой, `pipeline/deploy.yml:153`).<br>4. `docker compose -f /opt/poshtomat/compose.yaml up -d --wait` | Повертає **лише образ**: `compose.yaml` на VM лишається від поточного деплою — CI-відкат бере його з коміту того запуску (`pipeline/deploy.yml:114`), а ручний ні. Якщо деплой змінював `compose.yaml` (як 14.10), поверніть і його: вміст `deploy/compose.yaml` з попереднього коміту → `/opt/poshtomat/compose.yaml`. Образ має бути на VM: після деплою VM виходить з реєстру (`:182`), а локально лишаються образи, зібрані до 7 днів тому (`:177`). Перевірка — команда з кроку 2. Наступний деплой перезапише `.env` |
+| `dbPoolMax` не 20, а деплою не було (хтось змінював `compose.yaml` на VM вручну) | Повернути `DB_POOL_MAX: "20"` в `environment:` api і worker | відредагуйте `/opt/poshtomat/compose.yaml`, потім `docker compose -f /opt/poshtomat/compose.yaml up -d api worker` | Перевірте командою «Який пул насправді…». Наступний деплой перезапише файл на VM версією з репо (`pipeline/deploy.yml:157`, `:172`) — виправлення має бути і в `deploy/compose.yaml` у репо |
+| Пул 20, `db_pool_waiting` > 0, rps значно вищий, ніж учора | Перевантаження — тимчасово підняти пул (запас є: PostgreSQL на тій самій VM) | `DB_POOL_MAX: "30"` у `/opt/poshtomat/compose.yaml`, потім `docker compose -f /opt/poshtomat/compose.yaml up -d api` | Слідкуйте за CPU/пам'яттю VM (2 vCPU / 4 GB); ескалюйте розробнику. Зміна тимчасова: наступний деплой поверне значення з `deploy/compose.yaml` у репо |
 | `500` з однією помилкою після деплою | Відкат, як у першому рядку | див. перший рядок | Заведіть баг з текстом помилки з логу |
-| Перезапуск «на всяк випадок» | **Не допоможе**, якщо причина в конфігу чи коді — перезапуститься те саме | — | 14.10 перезапуск о 14:20 нічого не змінив (`docs/rca.md`, доказ 10) |
+| Перезапуск «на всяк випадок» | **Не допоможе**, якщо причина в конфігу чи коді — перезапуститься те саме | — | 14.10 перезапуск о 14:20 нічого не змінив (`docs/rca.md`, доказ 19) |
 
 ## Коли ескалювати і кого кликати
 
@@ -73,7 +82,7 @@ timeout after 2000ms`; (2) `db_pool_in_use` стоїть рівним число
 - Протягом 10 хв після дії: `p95_ms` < 500 мс, `error_rate` < 0.01, `db_pool_waiting` = 0,
   обидва пейджі закрились.
 - Немає нових тайм-аутів пулу:
-  `docker compose -f deploy/compose.yaml logs --since 5m api | grep -c 'db pool wait timeout'` → `0`.
+  `docker compose -f /opt/poshtomat/compose.yaml logs --since 5m api | grep -c 'db pool wait timeout'` → `0`.
 - Видача працює: попросіть гарячу лінію або колегу перевірити один поштомат; у метриках
   `rps` не впав (люди знову користуються).
 - Запишіть у #poshtomat-oncall: що зробили, о котрій, і що причина ще не встановлена (якщо

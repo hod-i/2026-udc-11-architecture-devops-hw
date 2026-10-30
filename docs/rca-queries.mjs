@@ -6,13 +6,18 @@
 //   msgs <log.jsonl>                          count of each "msg", most frequent first
 //   find <log.jsonl> <text>                   lines containing <text>: count, first and last ts
 //   lines <file> <text>                       every line containing <text>, with its number
+//   count <log.jsonl> <text> [HH:MM] [HH:MM]  how many lines contain <text> in [from, to)
 //   per-minute <log.jsonl> <text> [HH:MM] [HH:MM]  lines containing <text>, per minute
 //   group <log.jsonl> <msg> <field,field,...> [HH:MM] [HH:MM]  events with this msg, counted
 //                                             by the given fields (e.g. status,path,error)
 //   metric <metrics.csv> <column> <HH:MM> <HH:MM>  avg / min / max of a column, [from, to)
 //   rows <metrics.csv> <HH:MM> <HH:MM> [col,col,...]  the rows themselves, [from, to)
-//   env-unread <file>                         env vars set in <file> (compose or diff) that
-//                                             app/src/config.js never reads
+//   above <metrics.csv> <column> <threshold> [HH:MM] [HH:MM]  minutes where column > threshold:
+//                                             how many, first and last
+//   env-unread <file> [old|new]               env vars set in <file> (compose or diff) that
+//                                             app/src/config.js never reads; for a diff, `old`
+//                                             reads the -/context lines, `new` the +/context
+//                                             lines, nothing — every line. TZ is read by Node.
 
 import { readFileSync } from "node:fs";
 
@@ -50,6 +55,14 @@ const commands = {
     });
   },
 
+  count([file, text, from, to]) {
+    let n = 0;
+    for (const line of read(file).trim().split("\n")) {
+      if (line.includes(text) && inRange(JSON.parse(line).ts, from, to)) n += 1;
+    }
+    console.log(`count ${n}`);
+  },
+
   "per-minute"([file, text, from, to]) {
     const counts = new Map();
     for (const line of read(file).trim().split("\n")) {
@@ -84,14 +97,24 @@ const commands = {
     for (const r of rows) console.log(pick.map((c) => (c === "ts" ? hhmm(r.ts) : r[c])).join(","));
   },
 
-  "env-unread"([file]) {
+  above([file, col, threshold, from, to]) {
+    const hits = csv(file).filter((r) => inRange(r.ts, from, to) && r[col] > Number(threshold));
+    console.log(`${col} > ${threshold}: ${hits.length} min` + (hits.length ? `, first ${hhmm(hits[0].ts)}, last ${hhmm(hits.at(-1).ts)}` : ""));
+  },
+
+  "env-unread"([file, side]) {
     const readByApp = new Set([...read("app/src/config.js").matchAll(/env\.([A-Z_]+)/g)].map((m) => m[1]));
-    const set = new Set(
-      [...read(file).matchAll(/^[+ ]?\s+([A-Z][A-Z0-9_]+):/gm)].map((m) => m[1]),
-    );
+    const keep = { old: /^[- ]/, new: /^[+ ]/ }[side];
+    const set = new Set();
+    for (const raw of read(file).split("\n")) {
+      if (keep && !keep.test(raw)) continue;
+      const m = /^\s+([A-Z][A-Z0-9_]+):/.exec(keep ? raw.slice(1) : raw);
+      if (m) set.add(m[1]);
+    }
     const unread = [...set].filter((k) => !readByApp.has(k) && k !== "TZ");
     console.log(`read by app/src/config.js: ${[...readByApp].join(", ")}`);
-    console.log(`set in ${file} but never read: ${unread.join(", ") || "none"}`);
+    console.log(`set in ${file}${side ? ` (${side})` : ""}: ${[...set].join(", ")}`);
+    console.log(`never read: ${unread.join(", ") || "none"}`);
   },
 };
 

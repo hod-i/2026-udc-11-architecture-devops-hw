@@ -17,7 +17,8 @@
 # Один раз на VM: install -d -m 700 -o <DEPLOY_USER> /opt/poshtomat
 #
 # Відкат: Re-run job deploy у попередньому успішному запуску. Він розгорне образ,
-# зібраний у тому запуску (за дайджестом).
+# зібраний у тому запуску (за дайджестом). Якщо новий стек не пройде healthcheck, крок
+# Deploy сам поверне попередні compose.yaml і .env, а job завершиться помилкою.
 name: deploy
 
 on:
@@ -46,6 +47,11 @@ jobs:
           node-version: "24" # та сама гілка, що в deploy/Dockerfile
       - run: npm test
         working-directory: app
+      # Тести перевіряльника і самі перевірки деплою (з кореня репо), зокрема E1 — змінні
+      # з compose мають читатися в app/src/config.js (post-mortem 14.10, action item #1).
+      # Перший запуск check:deploy тягне yaml@2.8.1 через npx — на раннері мережа є.
+      - run: npm run test:tools
+      - run: npm run check:deploy
 
   build:
     needs: test
@@ -169,10 +175,34 @@ jobs:
           cd "$1"
           # Спершу тягнемо образ: якщо це не вдасться, на VM нічого не зміниться.
           docker compose -f compose.yaml.new --env-file .env.new pull --quiet
+          # Зберігаємо поточний стан, щоб повернутися до нього, якщо новий не пройде healthcheck.
+          # Попередній образ ще на VM: prune нижче запускається лише після успіху.
+          had_prev=false
+          if [ -f compose.yaml ] && [ -f .env ]; then
+            cp -p compose.yaml compose.yaml.prev
+            cp -p .env .env.prev
+            had_prev=true
+          fi
           mv compose.yaml.new compose.yaml
           mv .env.new .env
           # --wait чекає, поки api пройде healthcheck, а worker запуститься.
-          docker compose up -d --wait --wait-timeout 120 --remove-orphans
+          if ! docker compose up -d --wait --wait-timeout 120 --remove-orphans; then
+            echo "::error::Новий стек не пройшов healthcheck — повертаю попередні compose.yaml і .env"
+            # Лише стан сервісів: логи контейнерів у журнал CI не виводимо — GitHub зберігає
+            # його поза нашою VM, а персональні дані мають лишатися в ЄС.
+            docker compose ps || true
+            if [ "$had_prev" = true ]; then
+              mv compose.yaml.prev compose.yaml
+              mv .env.prev .env
+              docker compose up -d --wait --wait-timeout 120 --remove-orphans ||
+                echo "::error::Попередній стек теж не піднявся — потрібне ручне втручання (docs/runbook.md)"
+              docker compose ps || true
+            else
+              echo "::error::Попереднього стану немає (перший деплой) — повертати нічого"
+            fi
+            exit 1
+          fi
+          rm -f compose.yaml.prev .env.prev
           docker compose ps
           docker image prune -f --filter "until=168h"
           EOF
