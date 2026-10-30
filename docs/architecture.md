@@ -1,72 +1,126 @@
 # Архітектура «Поштомата громади» — C4
 
-> Task B. Скопіюйте у `docs/architecture.md`. Діаграми — Mermaid: `C4Context` /
-> `C4Container` або `flowchart`. Кожну стрілку перевірте в коді. `app/` не редагуйте.
->
-> Діаграми і приклади нижче — з **іншої** системи (онлайн-запис до клініки): вони показують
-> синтаксис і рівень деталей. Замініть їх своїми.
+Діаграми показують систему такою, якою вона є в коді `app/` (версія 1.7.3,
+`app/package.json:3`), а не в `app/docs/ARCHITECTURE.md` (v1.5). Номери біля стрілок — рядки
+таблиці доказів нижче. Запропоноване в ADR-0001 на діаграмах не показано.
+
+Сховище: у репо — лише в пам'яті (`app/src/db.js:1-2`), `DATABASE_URL` читається
+(`app/src/config.js:7`), але ніде не використовується. На діаграмах — PostgreSQL, бо «in
+production the same interface sits on PostgreSQL» (`app/src/db.js:1`) і він на тій самій VM
+(`deploy/compose.yaml:2`).
 
 ## Рівень 1 — System Context
 
 ```mermaid
 C4Context
-  title Онлайн-запис до клініки — System Context (приклад, замініть своїм)
-  Person(patient, "Пацієнт", "Записується на прийом")
-  Person(registrar, "Реєстратор", "Веде розклад лікарів")
-  System(booking, "Сервіс запису", "Розклад і записи")
-  System_Ext(mail, "Email-провайдер", "Листи-підтвердження")
-  Rel(patient, booking, "Записується", "HTTPS")
-  Rel(registrar, booking, "Редагує розклад", "HTTPS")
-  Rel(booking, mail, "Шле підтвердження", "HTTPS")
+  title Поштомат громади — System Context
+
+  Person(courier, "Кур'єр служби доставки", "Кладе посилку в комірку")
+  Person(resident, "Мешканець", "Отримує SMS з кодом, забирає посилку")
+  Person(staff, "Персонал громади", "Ролі staff / admin")
+
+  System(poshtomat, "Поштомат громади", "Реєструє посилки, шле SMS з 6-значним кодом, видає за кодом, повертає незабрані через 72 год")
+
+  System_Ext(scanner, "Сканер служби доставки", "Реєструє посилку при закладанні")
+  System_Ext(locker, "Екран поштомата", "Термінал введення коду")
+  System_Ext(monitoring, "Моніторинг", "Перевіряє доступність")
+  System_Ext(sms, "SMS-провайдер", "HTTP API надсилання SMS")
+  System_Ext(courierApi, "API повернень служби доставки", "Приймає заявки на повернення відправнику")
+
+  Rel(courier, scanner, "1. Сканує посилку")
+  Rel(scanner, poshtomat, "2. Реєструє посилку", "JSON/HTTP")
+  Rel(resident, locker, "3. Вводить 6-значний код")
+  Rel(locker, poshtomat, "4. Перевіряє код, видає посилку", "JSON/HTTP")
+  Rel(staff, poshtomat, "5. Переглядає посилки", "JSON/HTTP, Bearer-сесія")
+  Rel(monitoring, poshtomat, "6. Health-check", "HTTP")
+  Rel(poshtomat, sms, "7. SMS про прибуття", "JSON/HTTP, Bearer-токен")
+  Rel(sms, resident, "8. SMS з номером поштомата і кодом", "SMS")
+  Rel(poshtomat, courierApi, "9. Заявка на повернення", "JSON/HTTP")
+
+  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
 ```
 
 ## Рівень 2 — Container
 
 ```mermaid
 C4Container
-  title Онлайн-запис до клініки — Container (приклад, замініть своїм)
-  Person(patient, "Пацієнт")
-  Person(registrar, "Реєстратор")
-  System_Boundary(clinic, "Сервіс запису") {
-    Container(spa, "Веб-застосунок", "SPA у браузері")
-    Container(api, "API", "Node.js")
-    ContainerDb(db, "База даних", "PostgreSQL")
+  title Поштомат громади — Container
+
+  Person(resident, "Мешканець", "Отримує SMS з кодом")
+  Person(staff, "Персонал громади", "Ролі staff / admin")
+
+  System_Ext(scanner, "Сканер служби доставки", "Реєструє посилку")
+  System_Ext(locker, "Екран поштомата", "Введення коду")
+  System_Ext(monitoring, "Моніторинг", "Health-check")
+
+  System_Boundary(vm, "Поштомат громади — одна VM") {
+    Container(api, "API", "Node.js 22, node:http, сервіс compose api", "POST /parcels, POST /pickup, GET /admin/parcels, GET /health")
+    Container(worker, "SMS-worker", "Node.js 22, сервіс compose worker, той самий образ", "Кожні 10 с до 50 посилок без сповіщення, SMS до 5/с, на 429 до 4 спроб")
+    Container(expire, "Нічна задача expire-parcels", "Node.js 22, cron на VM", "Посилки waiting понад 72 год: returned і заявка на повернення")
+    ContainerDb(db, "PostgreSQL", "На хості VM, поза compose", "Посилки, події, сесії персоналу")
   }
-  System_Ext(mail, "Email-провайдер")
-  Rel(patient, spa, "Записується", "HTTPS")
-  Rel(registrar, spa, "Редагує розклад", "HTTPS")
-  Rel(spa, api, "Викликає", "JSON/HTTPS")
-  Rel(api, db, "Читає і пише записи", "SQL")
-  Rel(api, mail, "Шле підтвердження", "HTTPS")
+
+  System_Ext(sms, "SMS-провайдер", "POST /messages")
+  System_Ext(courierApi, "API повернень служби доставки", "POST /returns")
+
+  Rel(scanner, api, "10. POST /parcels", "JSON/HTTP")
+  Rel(locker, api, "11. POST /pickup", "JSON/HTTP")
+  Rel(staff, api, "12. GET /admin/parcels", "JSON/HTTP, Bearer-сесія")
+  Rel(monitoring, api, "13. GET /health", "HTTP")
+  Rel(api, db, "14. Посилки, коди, події, сесії", "SQL, пул з'єднань")
+  Rel(worker, db, "15. Посилки без сповіщення, notifiedAt", "SQL")
+  Rel(worker, sms, "16. Надсилає SMS", "JSON/HTTP, Bearer SMS_TOKEN")
+  Rel(sms, resident, "17. SMS з кодом", "SMS")
+  Rel(expire, db, "18. Прострочені посилки, status returned", "SQL")
+  Rel(expire, courierApi, "19. Заявка на повернення", "JSON/HTTP, без автентифікації")
+
+  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
 ```
+
+API і worker напряму не спілкуються — лише через спільну БД: worker опитує її
+(`app/src/worker.js:24`), черги чи іншого каналу в коді немає.
 
 ## Стрілки і докази
 
-Один рядок — одна стрілка з ваших діаграм. «AI мав рацію?»: **є** — AI намалював цю
+Один рядок — одна стрілка з діаграм вище. «AI мав рацію?»: **є** — AI намалював цю
 стрілку; **пропустив** — у його діаграмі її немає.
 
 | # | Стрілка (звідки → куди: що і як) | Доказ (`файл:рядок`) | AI з документації (`ai-runs/c4-from-docs.md`) | AI з коду (`ai-runs/c4-from-code.md`) |
 |---|---|---|---|---|
-| 1 | <...> | `<файл>:<рядок>` | <є / пропустив> | <є / пропустив> |
-| 2 | <...> | `<...>` | <...> | <...> |
-
-_Приклад рядків: «1 | API → Email-провайдер: лист-підтвердження після запису, HTTPS |
-`src/bookings.js:48` | є | є»; «2 | API → БД: читає розклад лікарів, SQL |
-`src/schedule.js:12` | пропустив — за README розклад приходить з HR-системи | є»._
+| 1 | Кур'єр → Сканер: сканує посилку при закладанні | `app/src/parcels.js:34` («Called by the delivery operator's scanner when a parcel goes into a cell») | є | є |
+| 2 | Сканер → Поштомат: реєструє посилку, JSON/HTTP | `app/src/server.js:38-40`, `app/src/parcels.js:34-35` | є | є |
+| 3 | Мешканець → Екран: вводить 6-значний код | `app/src/parcels.js:58` («the code the person typed»), `:60` (`/^\d{6}$/`) | є — але підпис «Вводить 4-значний код» хибний | є |
+| 4 | Екран → Поштомат: перевіряє код і видає посилку, JSON/HTTP | `app/src/server.js:42-45`, `app/src/parcels.js:58-68` | є | є |
+| 5 | Персонал → Поштомат: список посилок, Bearer-сесія | `app/src/server.js:13-19`, `:47-49`, `app/src/parcels.js:71-75` | є | є |
+| 6 | Моніторинг → Поштомат: health-check, HTTP | `app/src/server.js:37` (ендпоінт); хто його опитує — лише `app/docs/ARCHITECTURE.md:17` | є | є |
+| 7 | Поштомат → SMS-провайдер: SMS про прибуття, JSON/HTTP, Bearer | `app/src/worker.js:28`, `app/src/sms.js:31-34` | є | є |
+| 8 | SMS-провайдер → Мешканець: SMS з номером поштомата і кодом | `app/src/worker.js:11-13` | є | є |
+| 9 | Поштомат → API повернень служби доставки: заявка на повернення | `app/bin/expire-parcels.js:15`, `app/src/courier.js:7-15` | **пропустив** — у документації цієї зовнішньої системи немає | є |
+| 10 | Сканер → API: `POST /parcels` | `app/src/server.js:38-40` | є | є |
+| 11 | Екран → API: `POST /pickup` | `app/src/server.js:42-45` | є | є |
+| 12 | Персонал → API: `GET /admin/parcels`, Bearer-сесія | `app/src/server.js:16`, `:47-49` | є | є |
+| 13 | Моніторинг → API: `GET /health` | `app/src/server.js:37`; хто опитує — `app/docs/ARCHITECTURE.md:17` | є | є |
+| 14 | API → PostgreSQL: посилки, коди, події, сесії | `app/src/parcels.js:43-54`, `:61-67`, `:74`; `app/src/server.js:18`; `app/src/db.js:1` | є | є |
+| 15 | Worker → PostgreSQL: посилки без сповіщення, ставить `notifiedAt` | `app/src/worker.js:24`, `:33` | є | є |
+| 16 | Worker → SMS-провайдер: `POST {SMS_BASE_URL}/messages`, Bearer `SMS_TOKEN`, до 5/с, на 429 до 4 спроб | `app/src/worker.js:28`, `:44-49`; `app/src/sms.js:10`, `:14`, `:31-41`; `smsBaseUrl` у коді використовує лише worker (`app/src/worker.js:45`) | є | є |
+| 17 | SMS-провайдер → Мешканець: SMS з кодом | `app/src/worker.js:11-13` | є | є |
+| 18 | Нічна задача → PostgreSQL: шукає прострочені, ставить `returned` | `app/bin/expire-parcels.js:12`, `:14`; `app/src/parcels.js:78-88` | є | є |
+| 19 | Нічна задача → API повернень: `POST {COURIER_BASE_URL}/returns`, без автентифікації | `app/bin/expire-parcels.js:15`, `:26`; `app/src/courier.js:7-9` (лише `content-type`); `courierBaseUrl` у коді використовує лише нічна задача (`app/bin/expire-parcels.js:26`) | **пропустив** — нічна задача в нього лише «позначає прострочені як повернені» | є |
 
 ## Що AI вигадав / пропустив
 
 | Прогін | Вигадав — стрілки й компоненти, яких у коді немає (і чим це перевірили) | Пропустив — стрілки з таблиці вище, яких немає в AI |
 |---|---|---|
-| з документації | <...> | <номери рядків таблиці> |
-| з коду | <...> | <...> |
+| з документації | Стрілок і компонентів — нічого. Хибні підписи з застарілої документації: «4-значний код» (рядок 3; у коді 6 цифр — `app/src/parcels.js:27`, `:60`) і «кожні 30 с» в описі worker (у коді 10 с — `app/src/worker.js:8`) | 9, 19 |
+| з коду | Нічого: кожну його стрілку підтверджено рядками 1–19. Додаткові стрілки «Мешканець → Екран» на рівні Container — ті самі, що рядок 3, не вигадані | — |
 
-_Приклад: «з документації — вигадав API → Redis: кешу в коді немає,
-`grep -rni redis src` нічого не знаходить»._
+**Разом:** з документації — вигадано 0, пропущено 2; з коду — вигадано 0, пропущено 0.
 
-**Разом:** з документації — вигадано <…>, пропущено <…>; з коду — вигадано <…>, пропущено <…>.
+Що це показує: документація не бреше про те, що є, але відстала від коду. Інтеграцію зі
+службою доставки (`app/src/courier.js`) у неї так і не дописали, тому AI з документації не
+знав про цілу зовнішню систему, а параметри (довжина коду, інтервал) взяв застарілі. AI з
+коду сам знайшов ці розбіжності й перелічив їх наприкінці відповіді.
 
-## Запропоноване (з ADR) — необов'язково
-
-<Якщо показуєте на діаграмі частину з вашого ADR — позначте її «запропоновано» (окремий
-колір, підпис або окрема діаграма), а доказом дайте розділ `docs/adr/0001-notifications.md`.>
+Ще дві деталі прогону з коду, які правильні щодо `app/`, але не щодо продакшну: «пул до 4
+з'єднань» і «SMS до 5/с» — це значення за замовчуванням (`app/src/config.js:9`, `:13`), а в
+`deploy/compose.yaml:16`, `:20` задано 20 і 20. Каталогу `deploy/` прогін не бачив.
