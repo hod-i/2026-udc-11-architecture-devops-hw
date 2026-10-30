@@ -379,6 +379,36 @@ function oneShot(svc) {
   return String(svc?.restart ?? "") === "no" || svc?.deploy?.restart_policy?.condition === "none";
 }
 
+export const APP_CONFIG = "app/src/config.js";
+// Read by Node itself (or the C library under it), not by app/src/config.js.
+export const RUNTIME_ENV = new Set(["TZ", "NODE_ENV", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS"]);
+
+/** Names the app reads: every env.NAME / env["NAME"] in app/src/config.js; null if there is no such file. */
+export function envReadByApp(root) {
+  const full = join(root, APP_CONFIG);
+  if (!existsSync(full)) return null;
+  const text = readFileSync(full, "utf8");
+  return new Set([...text.matchAll(/\benv(?:\.([A-Za-z_]\w*)|\[\s*["']([A-Za-z_]\w*)["']\s*\])/g)].map((m) => m[1] ?? m[2]));
+}
+
+// A service runs the app if it builds it, uses the image of a service that does, or its image
+// is named after the app (app/package.json "name"). A postgres or nginx sidecar has its own env.
+function appServices(compose, root) {
+  let appName = null;
+  try {
+    appName = JSON.parse(readFileSync(join(root, "app/package.json"), "utf8")).name?.toLowerCase() ?? null;
+  } catch {
+    // no package.json: only build: and shared images identify the app
+  }
+  const all = services(compose);
+  const built = new Set(all.filter(([, svc]) => svc?.build && svc?.image).map(([, svc]) => String(svc.image)));
+  return all.filter(([, svc]) => {
+    if (svc?.build) return true;
+    const image = String(svc?.image ?? "");
+    return image !== "" && (built.has(image) || (appName !== null && image.toLowerCase().includes(appName)));
+  });
+}
+
 export const RULES = [
   {
     id: "D1",
@@ -530,6 +560,30 @@ export const RULES = [
         }
       }
       return problems.length ? fail(problems.join("; ")) : pass("секретоподібні змінні задано посиланнями");
+    },
+  },
+  {
+    // Post-mortem 2026-10-14, action item #1: DB_POOL_MAX was renamed to DB_POOL_SIZE in
+    // compose, config.js never read the new name, and the pool silently fell back to 4.
+    id: "E1",
+    title: "Кожну змінну з environment: застосунку читає app/src/config.js",
+    hint: "Застосунок бачить лише змінні, які читає app/src/config.js (env.NAME); змінну з іншою назвою він мовчки ігнорує і бере значення за замовчуванням — так 14.10 DB_POOL_SIZE замість DB_POOL_MAX зменшив пул БД з 20 до 4. Поверніть назву, яку читає config.js, або спершу додайте її читання в config.js. TZ, NODE_ENV, NODE_OPTIONS, NODE_EXTRA_CA_CERTS читає сам Node — їх можна. Сервіси з чужими образами (postgres, nginx) не перевіряються.",
+    check({ compose, root }) {
+      const problem = composeProblem(compose);
+      if (problem) return problem;
+      const known = envReadByApp(root);
+      if (!known) return skip(`немає ${APP_CONFIG} — нема з чим звірити змінні`);
+      const ours = appServices(compose, root);
+      if (!ours.length) return skip("жоден сервіс compose не запускає застосунок (build:, його образ чи назва з app/package.json)");
+      const problems = [];
+      for (const [name, svc] of ours) {
+        for (const [key] of envEntries(svc?.environment)) {
+          if (!known.has(key) && !RUNTIME_ENV.has(key)) problems.push(`${name}: ${key}`);
+        }
+      }
+      return problems.length
+        ? fail(`${APP_CONFIG} не читає: ${problems.join("; ")}`)
+        : pass(`змінні ${ours.map(([n]) => n).join(", ")} читає ${APP_CONFIG}`);
     },
   },
   {

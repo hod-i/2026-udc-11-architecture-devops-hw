@@ -1,0 +1,17 @@
+ID  STATUS  MESSAGE
+D1  PASS    Базовий образ з явним тегом (не latest): усі FROM мають конкретний тег або digest
+D2  PASS    USER у фінальному образі, не root: USER node
+D3  FAIL    Перевірка здоров'я: HEALTHCHECK або healthcheck у кожного сервісу: у Dockerfile немає HEALTHCHECK; без healthcheck у compose: worker
+            підказка: Або HEALTHCHECK у Dockerfile, або healthcheck: (test, interval, retries) у кожного сервісу compose; HEALTHCHECK NONE, test: ["NONE"] і disable: true — це не перевірка. Образ спільний для api і worker, а HTTP-сервер є лише в api: HTTP-перевірку з образу worker не пройде — для worker вимкніть її (healthcheck: disable: true) або дайте йому власну, а сервісу з ports: її вимикати не можна. У node:*-alpine і node:*-slim немає curl — перевіряйте через node -e.
+D4  PASS    Жодних секретів у ENV/ARG Dockerfile: секретоподібних ENV/ARG зі значенням немає
+C1  PASS    Образи в compose з фіксованим тегом: усі образи мають тег або digest
+C2  PASS    Політика перезапуску в кожного сервісу: restart є в кожного сервісу
+C3  PASS    Ліміт пам'яті в кожного сервісу: ліміт пам'яті є в кожного сервісу
+C4  PASS    Секрети в compose лише посиланням: секретоподібні змінні задано посиланнями
+W1  PASS    pipeline/deploy.yml існує, валідний YAML, без pull_request_target: тригери: push, workflow_dispatch
+W2  PASS    Мінімальні permissions на рівні workflow: permissions задано
+W3  PASS    Деплой-job з environment: і needs: на тести: deploy (environment) ← needs ← test
+W4  PASS    Секрети в workflow лише через ${{ secrets.NAME }}: секретоподібні значення лише з secrets
+W5  PASS    Кожен uses: закріплено тегом або SHA: закріплено: 7
+
+PASS 12  FAIL 1  SKIP 0

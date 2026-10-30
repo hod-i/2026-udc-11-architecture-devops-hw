@@ -1,35 +1,89 @@
-# Поштомат громади — продакшн на одній VM (docker compose up -d).
-# PostgreSQL працює на самій VM, поза compose.
+# Поштомат громади — продакшн на одній VM. PostgreSQL працює на самій VM, поза compose.
+#
+# Образ збирає CI (pipeline/deploy.yml) і кладе в реєстр, тут він лише запускається.
+# Значення ${...} беруться з файлу .env поруч із цим файлом. Його пише деплой, права
+# 600, у git його немає:
+#   POSHTOMAT_IMAGE  образ із дайджестом: ghcr.io/<owner>/poshtomat@sha256:...
+#   DATABASE_URL     підключення до PostgreSQL (секрет, бо може містити пароль)
+#   SMS_TOKEN        токен SMS-провайдера (секрет, потрібен лише worker-у)
+#
+# Вручну:              docker compose up -d --wait
+# Нічна задача (cron): docker compose run --rm expire
+name: poshtomat
+
+x-app: &app
+  image: ${POSHTOMAT_IMAGE:?set POSHTOMAT_IMAGE in .env}
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 128
+  # Без ротації журнали json-file ростуть, доки не заповнять диск VM.
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+# Кожен сервіс отримує лише ті змінні, які читає: SMS-токен є тільки у worker,
+# а не в API, що дивиться в інтернет.
+x-db-env: &db-env
+  TZ: "Europe/Kyiv"
+  LOG_LEVEL: "info"
+  DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+  DB_POOL_MAX: "20"
+  DB_POOL_WAIT_MS: "2000"
+
 services:
   api:
-    image: poshtomat:latest
-    build:
-      context: ../app
-      dockerfile: ../deploy/Dockerfile
+    <<: *app
     ports:
       - "8080:8080"
     environment:
-      TZ: "Europe/Kyiv"
+      <<: *db-env
       PORT: "8080"
-      LOG_LEVEL: "info"
-      DATABASE_URL: "postgres://poshtomat@192.0.2.10:5432/poshtomat"
-      DB_POOL_MAX: "20"
-      DB_POOL_WAIT_MS: "2000"
-      SMS_BASE_URL: "https://sms.example.net/api/v2"
-      SMS_TOKEN: "CHANGE_ME"
-      SMS_RATE_PER_SEC: "20"
-      COURIER_BASE_URL: "https://courier.example.com/api/v1"
+    mem_limit: 512m
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   worker:
-    image: poshtomat:latest
+    <<: *app
     command: ["node", "src/worker.js"]
     environment:
-      TZ: "Europe/Kyiv"
-      LOG_LEVEL: "info"
-      DATABASE_URL: "postgres://poshtomat@192.0.2.10:5432/poshtomat"
-      DB_POOL_MAX: "20"
-      DB_POOL_WAIT_MS: "2000"
+      <<: *db-env
       SMS_BASE_URL: "https://sms.example.net/api/v2"
-      SMS_TOKEN: "CHANGE_ME"
-      SMS_RATE_PER_SEC: "20"
+      SMS_TOKEN: ${SMS_TOKEN:?set SMS_TOKEN in .env}
+      # Ліміт провайдера — 10 SMS/с (materials/vendors/sms-provider.md:16); 8 — запас 20 %.
+      # Було 20: звідси щоденні 429 і шумний алерт SmsProvider429RateHigh (post-mortem, #8).
+      SMS_RATE_PER_SEC: "8"
+    mem_limit: 256m
+    # Після SIGTERM worker доробляє поточний раунд SMS і до 10 с чекає паузи
+    # між раундами, тож стандартних 10 с на зупинку йому не вистачає.
+    stop_grace_period: 30s
+    # HEALTHCHECK з образу перевіряє HTTP /health, а HTTP-сервера у worker немає, як і
+    # інших ознак життя (heartbeat-файлу, порту) — перевірка завжди падала б. Падіння
+    # процесу ловить restart: unless-stopped, а зупинку розсилки — алерти по логах worker.
+    healthcheck:
+      disable: true
+
+  expire:
+    <<: *app
+    profiles: [jobs]
+    restart: "no"
+    command: ["node", "bin/expire-parcels.js"]
+    environment:
+      <<: *db-env
       COURIER_BASE_URL: "https://courier.example.com/api/v1"
+    mem_limit: 256m
+    # Разовий скрипт без HTTP-сервера: HEALTHCHECK з образу до нього не стосується.
+    healthcheck:
+      disable: true
