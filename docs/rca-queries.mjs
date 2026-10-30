@@ -1,0 +1,102 @@
+#!/usr/bin/env node
+// Queries over incident/ for docs/rca.md. No dependencies; run from the repo root:
+//   node docs/rca-queries.mjs <command> [args]
+// Works the same in PowerShell, cmd and Git Bash.
+//
+//   msgs <log.jsonl>                          count of each "msg", most frequent first
+//   find <log.jsonl> <text>                   lines containing <text>: count, first and last ts
+//   lines <file> <text>                       every line containing <text>, with its number
+//   per-minute <log.jsonl> <text> [HH:MM] [HH:MM]  lines containing <text>, per minute
+//   group <log.jsonl> <msg> <field,field,...> [HH:MM] [HH:MM]  events with this msg, counted
+//                                             by the given fields (e.g. status,path,error)
+//   metric <metrics.csv> <column> <HH:MM> <HH:MM>  avg / min / max of a column, [from, to)
+//   rows <metrics.csv> <HH:MM> <HH:MM> [col,col,...]  the rows themselves, [from, to)
+//   env-unread <file>                         env vars set in <file> (compose or diff) that
+//                                             app/src/config.js never reads
+
+import { readFileSync } from "node:fs";
+
+const [cmd, ...args] = process.argv.slice(2);
+const read = (file) => readFileSync(file, "utf8");
+const jsonLines = (file) => read(file).trim().split("\n").map((line) => JSON.parse(line));
+const hhmm = (ts) => ts.slice(11, 16);
+const inRange = (ts, from = "00:00", to = "24:00") => hhmm(ts) >= from && hhmm(ts) < to;
+
+function csv(file) {
+  const [head, ...rows] = read(file).trim().split("\n");
+  const cols = head.split(",");
+  return rows.map((row) => Object.fromEntries(row.split(",").map((v, i) => [cols[i], i === 0 ? v : Number(v)])));
+}
+
+const commands = {
+  msgs([file]) {
+    const counts = {};
+    for (const e of jsonLines(file)) counts[`${e.level} ${e.msg}`] = (counts[`${e.level} ${e.msg}`] ?? 0) + 1;
+    for (const [k, n] of Object.entries(counts).sort((a, b) => b[1] - a[1])) console.log(String(n).padStart(7), k);
+  },
+
+  find([file, text]) {
+    const hits = read(file).trim().split("\n").filter((line) => line.includes(text));
+    console.log(`count ${hits.length}`);
+    if (hits.length) {
+      console.log(`first ${hits[0]}`);
+      console.log(`last  ${hits.at(-1)}`);
+    }
+  },
+
+  lines([file, text]) {
+    read(file).split("\n").forEach((line, i) => {
+      if (line.includes(text)) console.log(`${i + 1}: ${line}`);
+    });
+  },
+
+  "per-minute"([file, text, from, to]) {
+    const counts = new Map();
+    for (const line of read(file).trim().split("\n")) {
+      if (!line.includes(text)) continue;
+      const ts = JSON.parse(line).ts;
+      if (inRange(ts, from, to)) counts.set(hhmm(ts), (counts.get(hhmm(ts)) ?? 0) + 1);
+    }
+    for (const [m, n] of counts) console.log(m, n);
+  },
+
+  group([file, msg, fields, from, to]) {
+    const keys = fields.split(",");
+    const counts = {};
+    for (const e of jsonLines(file)) {
+      if (e.msg !== msg || !inRange(e.ts, from, to)) continue;
+      const k = keys.map((f) => `${f}=${e[f]}`).join("  ");
+      counts[k] = (counts[k] ?? 0) + 1;
+    }
+    for (const [k, n] of Object.entries(counts).sort((a, b) => b[1] - a[1])) console.log(String(n).padStart(7), k);
+  },
+
+  metric([file, col, from, to]) {
+    const v = csv(file).filter((r) => inRange(r.ts, from, to)).map((r) => r[col]);
+    const avg = v.reduce((a, b) => a + b, 0) / v.length;
+    console.log(`${col} ${from}-${to} n=${v.length} avg=${avg.toFixed(2)} min=${Math.min(...v)} max=${Math.max(...v)}`);
+  },
+
+  rows([file, from, to, cols]) {
+    const rows = csv(file).filter((r) => inRange(r.ts, from, to));
+    const pick = cols ? ["ts", ...cols.split(",")] : Object.keys(rows[0] ?? {});
+    console.log(pick.join(","));
+    for (const r of rows) console.log(pick.map((c) => (c === "ts" ? hhmm(r.ts) : r[c])).join(","));
+  },
+
+  "env-unread"([file]) {
+    const readByApp = new Set([...read("app/src/config.js").matchAll(/env\.([A-Z_]+)/g)].map((m) => m[1]));
+    const set = new Set(
+      [...read(file).matchAll(/^[+ ]?\s+([A-Z][A-Z0-9_]+):/gm)].map((m) => m[1]),
+    );
+    const unread = [...set].filter((k) => !readByApp.has(k) && k !== "TZ");
+    console.log(`read by app/src/config.js: ${[...readByApp].join(", ")}`);
+    console.log(`set in ${file} but never read: ${unread.join(", ") || "none"}`);
+  },
+};
+
+if (!commands[cmd]) {
+  console.error(`unknown command: ${cmd ?? "(none)"}; see the header of docs/rca-queries.mjs`);
+  process.exit(2);
+}
+commands[cmd](args);
