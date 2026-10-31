@@ -106,24 +106,26 @@ const commands = {
     const readByApp = new Set([...read("app/src/config.js").matchAll(/env\.([A-Z_]+)/g)].map((m) => m[1]));
     const keep = { old: /^[- ]/, new: /^[+ ]/ }[side];
     const set = new Set();
-    let envIndent = null; // inside an `environment:` block: the indent of that key
+    // Variables count only inside an `environment:` block or a top-level `x-*:` extension
+    // block (anchors like `x-db-env: &db-env` merged into environment:) — not in `labels:`,
+    // `cap_drop:` or other lists and maps. `ctxIndent` is the indent of that block's key.
+    let ctxIndent = null;
     for (const raw of read(file).split("\n")) {
       if (keep && !keep.test(raw)) continue;
       const line = keep ? raw.slice(1) : raw;
       const indent = line.search(/\S/);
       if (indent === -1) continue;
-      if (envIndent !== null && indent <= envIndent) envIndent = null;
-      if (/^\s*environment:\s*$/.test(line)) {
-        envIndent = indent;
+      if (ctxIndent !== null && indent <= ctxIndent) ctxIndent = null;
+      if (/^\s*environment:\s*$/.test(line) || /^x-[\w-]+:/.test(line)) {
+        ctxIndent = indent;
         continue;
       }
-      // map form anywhere (also YAML anchors like x-db-env): `  NAME: value`
-      const map = /^\s+([A-Z][A-Z0-9_]+):/.exec(line);
-      // list form: `- NAME=value` anywhere; a bare `- NAME` only inside environment:
-      // (elsewhere it may be e.g. `cap_drop: [ALL]` written as a list)
+      if (ctxIndent === null) continue;
+      // map form `NAME: value`; list form `- NAME=value` or a bare `- NAME` (value from the host)
+      const map = /^\s+([A-Z][A-Z0-9_]*):/.exec(line);
       const list = /^\s+-\s+["']?([A-Z][A-Z0-9_]*)(=|["']?\s*$)/.exec(line);
       if (map) set.add(map[1]);
-      else if (list && (list[2] === "=" || envIndent !== null)) set.add(list[1]);
+      else if (list) set.add(list[1]);
     }
     const unread = [...set].filter((k) => !readByApp.has(k) && k !== "TZ");
     console.log(`read by app/src/config.js: ${[...readByApp].join(", ")}`);
