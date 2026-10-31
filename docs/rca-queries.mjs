@@ -130,11 +130,19 @@ const commands = {
       if (flow) {
         // split on commas outside quotes, so `{A: "x, B: y"}` gives only A; a map item is
         // `NAME: value`, a list item `NAME=value` or a bare `NAME`. As in YAML, a quote opens a
-        // quoted scalar only at the start of an item or a value (`url: x/o'b` stays plain)
-        const name = flow[1][0] === "{" ? /^\s*["']?([A-Z][A-Z0-9_]*)["']?\s*:/ : /^\s*["']?([A-Z][A-Z0-9_]*)(=|["']?\s*$)/;
+        // quoted scalar only at the start of an item or a value (`url: x/o'b` stays plain);
+        // inside quotes `\"` (double) and `''` (single) are escapes, not the closing quote
+        const body = flow[1];
+        const name = body[0] === "{" ? /^\s*["']?([A-Z][A-Z0-9_]*)["']?\s*:/ : /^\s*["']?([A-Z][A-Z0-9_]*)(=|["']?\s*$)/;
         let item = "";
         let quote = null;
-        for (const ch of flow[1].slice(1)) {
+        for (let i = 1; i < body.length; i++) {
+          const ch = body[i];
+          if ((quote === '"' && ch === "\\") || (quote === "'" && ch === "'" && body[i + 1] === "'")) {
+            item += ch + (body[i + 1] ?? "");
+            i += 1;
+            continue;
+          }
           if (quote) quote = ch === quote ? null : quote;
           else if ((ch === '"' || ch === "'") && /^\s*$|:\s+$|["']:$/.test(item)) quote = ch;
           else if (ch === "," || ch === "}" || ch === "]") {

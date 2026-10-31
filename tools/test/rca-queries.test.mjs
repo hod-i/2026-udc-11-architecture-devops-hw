@@ -65,6 +65,13 @@ test("env-unread: an apostrophe inside an unquoted value does not hide the next 
   assert.equal(neverRead(list), "DB_POOL_SIZE");
 });
 
+test("env-unread: escaped quotes ('' and \\\") do not close a quoted value", () => {
+  const single = ["services:", "  api:", "    environment: {SMS_BASE_URL: 'it''s, DB_POOL_SIZE: x', PORT: \"8080\"}", ""].join("\n");
+  assert.equal(neverRead(single), "none");
+  const double = ["services:", "  api:", '    environment: {SMS_BASE_URL: "x\\", DB_POOL_SIZE: y", PORT: "8080"}', ""].join("\n");
+  assert.equal(neverRead(double), "none");
+});
+
 test("env-unread on the real incident diff: new → DB_POOL_SIZE, old → none", () => {
   const diff = join(REPO, "incident", "changes", "v1.8.0.diff");
   const run = (side) => /^never read: (.*)$/m.exec(execFileSync(process.execPath, [SCRIPT, "env-unread", diff, side], { cwd: REPO, encoding: "utf8" }))[1];
