@@ -58,8 +58,9 @@
    понад 2 с.
 5. **Чому перезапуск не допоміг, а відкат допоміг.** О 14:20 перезапустили лише API на тій самій
    v1.8.0 — `restart`, а не новий деплой (доказ 18; `incident/deploys.log:8`). Змінних
-   оточення контейнера в даних немає, але їхній ефект видно: пул і після перезапуску стояв
-   рівно на 4 з чергою (доказ 19a), а тайм-аути тривали (доказ 19). Відкотили на v1.7.3 (докази 3a, 3b), у
+   оточення контейнера в даних немає, тож ліміт пулу після перезапуску прямо не підтверджено.
+   Видно лише, що `db_pool_in_use` і далі в усіх точках дорівнював 4, а `db_pool_waiting` був
+   ненульовим (доказ 19a), і тайм-аути тривали (доказ 19) — та сама картина, що до перезапуску. Відкотили на v1.7.3 (докази 3a, 3b), у
    `compose.yaml` якої `DB_POOL_MAX` = 20 (доказ 3d) і всі змінні застосунок читає (доказ 3).
    Що після відкату запустився саме цей compose, у даних прямо не записано, але ефект видно:
    пул перестав упиратися в 4 — зайнято до 14 з'єднань (доказ 3c), черги немає (доказ 3e), а
@@ -75,7 +76,7 @@
 | 3 | У `compose.yaml` v1.7.3 — старій стороні диффу релізу — застосунок читає кожну змінну | `node docs/rca-queries.mjs env-unread incident/changes/v1.8.0.diff old` | `set in incident/changes/v1.8.0.diff (old): TZ, PORT, LOG_LEVEL, DATABASE_URL, DB_POOL_MAX, DB_POOL_WAIT_MS, SMS_BASE_URL, SMS_TOKEN, SMS_RATE_PER_SEC, COURIER_BASE_URL`; `never read: none` |
 | 3a | О 14:47 відкотили саме на v1.7.3 | `node docs/rca-queries.mjs lines incident/deploys.log rollback` | `9: 2026-10-14T14:47:00+03:00   rollback  v1.7.3   olena   on-call, just in case` |
 | 3b | Після відкату API справді працював на v1.7.3 | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "service started" ts,version 14:47 16:00` | `1 ts=2026-10-14T14:47:00.236+03:00  version=1.7.3` |
-| 3d | У `compose.yaml` v1.7.3 `DB_POOL_MAX` = 20 — і в `api`, і в `worker` | `node docs/rca-queries.mjs lines incident/changes/v1.8.0.diff "DB_POOL_MAX"` | `86: -      DB_POOL_MAX: "20"` і `106: -      DB_POOL_MAX: "20"` (рядки старої версії) |
+| 3d | У `compose.yaml` v1.7.3 `DB_POOL_MAX` = 20 — і в `api`, і в `worker` | `node docs/rca-queries.mjs lines incident/changes/v1.8.0.diff "DB_POOL_MAX"`, `node docs/rca-queries.mjs lines incident/changes/v1.8.0.diff "  api:"` і `node docs/rca-queries.mjs lines incident/changes/v1.8.0.diff "  worker:"` | `86: -      DB_POOL_MAX: "20"` і `106: -      DB_POOL_MAX: "20"` (рядки старої версії); ключі сервісів — `75:    api:` і `98:    worker:`, інших у диффі немає. Отже, рядок 86 (між 75 і 98) належить `api`, рядок 106 (після 98) — `worker` |
 | 3e | Після відкату черга до пулу зникла | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_waiting 14:47 16:00` | `n=73 avg=0.00 min=0 max=0` |
 | 3c | Після відкату пул API знову перевищив 4 | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 14:47 16:00` | `n=73 avg=6.45 min=2 max=14` |
 | 4 | `config.js` не читає `DB_POOL_SIZE` і бере пул 4; з `DB_POOL_MAX` — 20 | `node --input-type=module -e "import { loadConfig } from './app/src/config.js'; console.log(loadConfig({ DB_POOL_SIZE: '20' }).dbPoolMax, loadConfig({ DB_POOL_MAX: '20' }).dbPoolMax)"` | `4 20` |
@@ -96,7 +97,7 @@
 | 17 | 13.10 тайм-аутів пулу не було жодного | `node docs/rca-queries.mjs find incident/baseline/api-2026-10-13.jsonl "db pool wait timeout"` | `count 0` |
 | 18 | Версії API на 14.10: v1.8.0 о 14:02 і 14:20, v1.7.3 о 14:47 | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "service started" ts,version` | `ts=2026-10-14T14:02:00.087+03:00 version=1.8.0`; `ts=2026-10-14T14:20:31.112+03:00 version=1.8.0`; `ts=2026-10-14T14:47:00.236+03:00 version=1.7.3` |
 | 19 | Перезапуск тієї ж версії о 14:20 не змінив нічого | `node docs/rca-queries.mjs per-minute incident/logs/api-2026-10-14.jsonl "db pool wait timeout" 14:18 14:24` | `14:18 78`, `14:19 88`, `14:20 44`, `14:21 74`, `14:22 83`, `14:23 92` |
-| 19a | Після перезапуску о 14:20 пул API так само рівно 4, з чергою: фактичний розмір пулу не змінився | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 14:21 14:47` і `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_waiting 14:21 14:47` | `n=26 avg=4.00 min=4 max=4` і `n=26 avg=17.38 min=14 max=20` |
+| 19a | Після перезапуску о 14:20 `db_pool_in_use` в усіх спостережених точках дорівнював 4, а `db_pool_waiting` був ненульовим. Змінних оточення контейнера після перезапуску в даних немає, тож ліміт пулу звідси не названо — картина лише та сама, що й до перезапуску (докази 5, 8) | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 14:21 14:47` і `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_waiting 14:21 14:47` | `n=26 avg=4.00 min=4 max=4` і `n=26 avg=17.38 min=14 max=20` |
 | 20 | p95 під v1.8.0 — ~4,5 с | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv p95_ms 14:02 14:47` | `n=45 avg=4476.16 min=945 max=4962` |
 | 21 | p95 до деплою — ~0,2 с | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv p95_ms 12:00 14:02` | `n=122 avg=189.44 min=140 max=262` |
 | 22 | p95 після відкату — ~0,2 с (618 мс — у хвилину відкату) | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv p95_ms 14:47 16:00` | `n=73 avg=193.34 min=140 max=618` |

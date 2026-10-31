@@ -51,6 +51,13 @@ test("env-unread: flow maps outside environment (labels) are not variables", () 
   assert.equal(neverRead(compose), "none");
 });
 
+test("env-unread: a comma inside a quoted flow value does not start a new variable", () => {
+  const map = ["services:", "  api:", '    environment: {SMS_BASE_URL: "https://x, FAKE_VAR: y", PORT: "8080"}', ""].join("\n");
+  assert.equal(neverRead(map), "none");
+  const list = ["@@ -1,3 +1,3 @@", " services:", "   api:", '+    environment: ["SMS_BASE_URL=https://x, FAKE_VAR=y", DB_POOL_SIZE=20]', ""].join("\n");
+  assert.equal(neverRead(list, "new"), "DB_POOL_SIZE");
+});
+
 test("env-unread on the real incident diff: new → DB_POOL_SIZE, old → none", () => {
   const diff = join(REPO, "incident", "changes", "v1.8.0.diff");
   const run = (side) => /^never read: (.*)$/m.exec(execFileSync(process.execPath, [SCRIPT, "env-unread", diff, side], { cwd: REPO, encoding: "utf8" }))[1];
