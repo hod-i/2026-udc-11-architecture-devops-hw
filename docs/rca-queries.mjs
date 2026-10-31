@@ -129,13 +129,14 @@ const commands = {
       const flow = /^\s*environment:\s*(?:&[\w-]+\s*)?([{[].*)$/.exec(line);
       if (flow) {
         // split on commas outside quotes, so `{A: "x, B: y"}` gives only A; a map item is
-        // `NAME: value`, a list item `NAME=value` or a bare `NAME`
+        // `NAME: value`, a list item `NAME=value` or a bare `NAME`. As in YAML, a quote opens a
+        // quoted scalar only at the start of an item or a value (`url: x/o'b` stays plain)
         const name = flow[1][0] === "{" ? /^\s*["']?([A-Z][A-Z0-9_]*)["']?\s*:/ : /^\s*["']?([A-Z][A-Z0-9_]*)(=|["']?\s*$)/;
         let item = "";
         let quote = null;
         for (const ch of flow[1].slice(1)) {
           if (quote) quote = ch === quote ? null : quote;
-          else if (ch === '"' || ch === "'") quote = ch;
+          else if ((ch === '"' || ch === "'") && /^\s*$|:\s+$|["']:$/.test(item)) quote = ch;
           else if (ch === "," || ch === "}" || ch === "]") {
             const m = name.exec(item);
             if (m) set.add(m[1]);

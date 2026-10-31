@@ -58,6 +58,13 @@ test("env-unread: a comma inside a quoted flow value does not start a new variab
   assert.equal(neverRead(list, "new"), "DB_POOL_SIZE");
 });
 
+test("env-unread: an apostrophe inside an unquoted value does not hide the next variable", () => {
+  const map = ["services:", "  api:", `    environment: {SMS_BASE_URL: https://sms.example.net/o'brien, "DB_POOL_SIZE": "20"}`, ""].join("\n");
+  assert.equal(neverRead(map), "DB_POOL_SIZE");
+  const list = ["services:", "  api:", `    environment: [SMS_BASE_URL=https://sms.example.net/o'brien, "DB_POOL_SIZE=20"]`, ""].join("\n");
+  assert.equal(neverRead(list), "DB_POOL_SIZE");
+});
+
 test("env-unread on the real incident diff: new → DB_POOL_SIZE, old → none", () => {
   const diff = join(REPO, "incident", "changes", "v1.8.0.diff");
   const run = (side) => /^never read: (.*)$/m.exec(execFileSync(process.execPath, [SCRIPT, "env-unread", diff, side], { cwd: REPO, encoding: "utf8" }))[1];
