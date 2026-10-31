@@ -58,8 +58,8 @@
 5. **Чому перезапуск не допоміг, а відкат допоміг.** О 14:20 перезапустили лише API на тій самій
    v1.8.0 — `restart`, а не новий деплой (доказ 18; `incident/deploys.log:8`). Змінних
    оточення контейнера в даних немає, але їхній ефект видно: пул і після перезапуску стояв
-   рівно на 4 з чергою (доказ 19a), а тайм-аути тривали (доказ 19). Відкат на v1.7.3 (доказ 3a) повернув `compose.yaml` з
-   `DB_POOL_MAX: "20"` (доказ 3) — пул знову 20 (у першу ж хвилину зайнято 14), черга зникла, остання 503 — за 2 с
+   рівно на 4 з чергою (доказ 19a), а тайм-аути тривали (доказ 19). Відкат на v1.7.3 (докази 3a, 3b) повернув `compose.yaml` з
+   `DB_POOL_MAX: "20"` (доказ 3) — пул знову 20 (у першу ж хвилину зайнято 14, доказ 3c), черга зникла, остання 503 — за 2 с
    до старту v1.7.3 (докази 15, 18).
 
 ## Докази
@@ -69,7 +69,9 @@
 | 1 | Реліз v1.8.0 перейменував `DB_POOL_MAX` на `DB_POOL_SIZE` в обох сервісах | `node docs/rca-queries.mjs lines incident/changes/v1.8.0.diff DB_POOL` | `86: -      DB_POOL_MAX: "20"`, `87: +      DB_POOL_SIZE: "20"`, `106: -      DB_POOL_MAX: "20"`, `107: +      DB_POOL_SIZE: "20"`, а також незмінні `88:        DB_POOL_WAIT_MS: "2000"` і `108:        DB_POOL_WAIT_MS: "2000"` |
 | 2 | У `compose.yaml` v1.8.0 є змінна, якої застосунок не читає | `node docs/rca-queries.mjs env-unread incident/changes/v1.8.0.diff new` | `never read: DB_POOL_SIZE` |
 | 3 | У `compose.yaml` v1.7.3 — старій стороні диффу релізу — застосунок читає кожну змінну | `node docs/rca-queries.mjs env-unread incident/changes/v1.8.0.diff old` | `set in incident/changes/v1.8.0.diff (old): TZ, PORT, LOG_LEVEL, DATABASE_URL, DB_POOL_MAX, DB_POOL_WAIT_MS, SMS_BASE_URL, SMS_TOKEN, SMS_RATE_PER_SEC, COURIER_BASE_URL`; `never read: none` |
-| 3a | О 14:47 відкотили саме на v1.7.3 | `node docs/rca-queries.mjs lines incident/deploys.log rollback` | `9: 2026-10-14T14:47:00+03:00   rollback  v1.7.3   olena   on-call, just in case` (що API після відкату справді v1.7.3 — доказ 18; пул після відкату — доказ 7) |
+| 3a | О 14:47 відкотили саме на v1.7.3 | `node docs/rca-queries.mjs lines incident/deploys.log rollback` | `9: 2026-10-14T14:47:00+03:00   rollback  v1.7.3   olena   on-call, just in case` |
+| 3b | Після відкату API справді працював на v1.7.3 | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "service started" ts,version 14:47 16:00` | `1 ts=2026-10-14T14:47:00.236+03:00  version=1.7.3` |
+| 3c | Після відкату пул API знову перевищив 4 | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 14:47 16:00` | `n=73 avg=6.45 min=2 max=14` |
 | 4 | `config.js` не читає `DB_POOL_SIZE` і бере пул 4; з `DB_POOL_MAX` — 20 | `node --input-type=module -e "import { loadConfig } from './app/src/config.js'; console.log(loadConfig({ DB_POOL_SIZE: '20' }).dbPoolMax, loadConfig({ DB_POOL_MAX: '20' }).dbPoolMax)"` | `4 20` |
 | 5 | Під v1.8.0 зайнято рівно 4 з'єднання пулу API, весь час | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 14:02 14:47` | `n=45 avg=4.00 min=4 max=4` |
 | 6 | До деплою пул тримав до 13 з'єднань | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 12:00 14:02` | `n=122 avg=6.62 min=2 max=13` |
@@ -82,7 +84,8 @@
 | 13 | Навантаження під час інциденту | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv rps 14:02 14:47` | `n=45 avg=11.80 min=11 max=12.8` |
 | 14 | 13.10 черги пулу не було за весь проміжок, за який є метрики, — 12:00–16:00 (240 хвилин) | `node docs/rca-queries.mjs metric incident/baseline/metrics-2026-10-13.csv db_pool_waiting 12:00 16:00` | `n=240 avg=0.00 min=0 max=0` |
 | 15 | Тайм-аути пулу — лише між деплоєм і відкатом | `node docs/rca-queries.mjs find incident/logs/api-2026-10-14.jsonl "db pool wait timeout"` | `count 3380`<br>`first {"ts":"2026-10-14T14:02:07.172+03:00","level":"error","msg":"request failed","method":"POST","path":"/parcels","status":503,"ms":2007,"error":"db pool wait timeout after 2000ms"}`<br>`last  {"ts":"2026-10-14T14:46:58.204+03:00","level":"error","msg":"request failed","method":"POST","path":"/pickup","status":503,"ms":3628,"error":"db pool wait timeout after 2000ms"}` |
-| 16 | Усі 503 за день — тайм-аут пулу: 503 у лозі стільки ж, скільки тайм-аутів (доказ 15: `count 3380`), і жодного з іншою помилкою. Лог містить кожну відповідь 5xx, а не вибірку (`incident/README.md:31`) | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "request failed" status,error` | `3380 status=503  error=db pool wait timeout after 2000ms`<br>`125 status=500  error=Cannot read properties of undefined (reading 'trim')` — окремий щоденний баг; спростування з командами — в останньому рядку «що НЕ є причиною» |
+| 16 | Усі 503 у лозі API за 14.10 — тайм-аут пулу, з іншою помилкою немає жодного | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "request failed" status,error` | `3380 status=503  error=db pool wait timeout after 2000ms`<br>`125 status=500  error=Cannot read properties of undefined (reading 'trim')` — окремий щоденний баг |
+| 16b | Лог API містить усі відповіді 5xx, а не вибірку: записів 5xx у лозі рівно стільки, скільки випливає з метрик (`rps × 60 × error_rate` по хвилинах) — і 14.10, і 13.10 | 14.10: `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "request failed" status` і `node docs/rca-queries.mjs est-5xx incident/metrics/2026-10-14.csv`<br>13.10: `node docs/rca-queries.mjs group incident/baseline/api-2026-10-13.jsonl "request failed" status` і `node docs/rca-queries.mjs est-5xx incident/baseline/metrics-2026-10-13.csv` | 14.10: `3380 status=503`, `125 status=500` (разом 3505) і `5xx implied by metrics: 3505`<br>13.10: `128 status=500` і `5xx implied by metrics: 128` |
 | 16a | Під v1.8.0 503 найбільше на видачі | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "request failed" status,path,error 14:02 14:47` | `2586 status=503  path=/pickup  error=db pool wait timeout after 2000ms`<br>`650 status=503  path=/parcels  error=db pool wait timeout after 2000ms`<br>`144 status=503  path=/admin/parcels  error=db pool wait timeout after 2000ms`<br>`52 status=500  path=/parcels  error=Cannot read properties of undefined (reading 'trim')` |
 | 17 | 13.10 тайм-аутів пулу не було жодного | `node docs/rca-queries.mjs find incident/baseline/api-2026-10-13.jsonl "db pool wait timeout"` | `count 0` |
 | 18 | Версії API на 14.10: v1.8.0 о 14:02 і 14:20, v1.7.3 о 14:47 | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "service started" ts,version` | `ts=2026-10-14T14:02:00.087+03:00 version=1.8.0`; `ts=2026-10-14T14:20:31.112+03:00 version=1.8.0`; `ts=2026-10-14T14:47:00.236+03:00 version=1.7.3` |
@@ -142,7 +145,7 @@
 
 **Висока.** Механізм відтворюється напряму (доказ 4: `DB_POOL_SIZE=20` → пул 4), а метрика
 пулу рівно 4 збігається з життям v1.8.0 з точністю до хвилини в обидва боки (докази 5–10, 15,
-18); усі 503 мають один текст — тайм-аут пулу (доказ 16); за того ж навантаження напередодні
+18); усі 503 мають один текст — тайм-аут пулу (доказ 16), і лог містить усі 5xx (доказ 16b); за того ж навантаження напередодні
 тайм-аутів не було (докази 11, 12, 14, 17). Чого бракує: застосунок не логує фактичний розмір
 пулу, тож «4» видно лише з метрики, а не з логу старту; продакшн-адаптер PostgreSQL у репо
 відсутній (`app/src/db.js:1-2`), тож поведінку пулу перевірено на тому самому інтерфейсі в

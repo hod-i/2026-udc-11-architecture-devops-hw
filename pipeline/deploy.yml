@@ -100,7 +100,7 @@ jobs:
         env:
           REPO: ${{ steps.name.outputs.repo }}
           DIGEST: ${{ steps.push.outputs.digest }}
-        run: echo "image=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+        run: echo "image=${REPO}@${DIGEST}" | tee -a "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: build

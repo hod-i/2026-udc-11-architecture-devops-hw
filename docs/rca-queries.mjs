@@ -14,6 +14,8 @@
 //   rows <metrics.csv> <HH:MM> <HH:MM> [col,col,...]  the rows themselves, [from, to)
 //   above <metrics.csv> <column> <threshold> [HH:MM] [HH:MM]  minutes where column > threshold:
 //                                             how many, first and last
+//   est-5xx <metrics.csv> [HH:MM] [HH:MM]     5xx responses the metrics imply: sum over minutes
+//                                             of rps * 60 * error_rate (to compare with the log)
 //   env-unread <file> [old|new]               env vars set in <file> (compose or diff) that
 //                                             app/src/config.js never reads; for a diff, `old`
 //                                             reads the -/context lines, `new` the +/context
@@ -102,6 +104,13 @@ const commands = {
     console.log(`${col} > ${threshold}: ${hits.length} min` + (hits.length ? `, first ${hhmm(hits[0].ts)}, last ${hhmm(hits.at(-1).ts)}` : ""));
   },
 
+  "est-5xx"([file, from, to]) {
+    const n = csv(file)
+      .filter((r) => inRange(r.ts, from, to))
+      .reduce((sum, r) => sum + r.rps * 60 * r.error_rate, 0);
+    console.log(`5xx implied by metrics: ${Math.round(n)}`);
+  },
+
   "env-unread"([file, side]) {
     const readByApp = new Set([...read("app/src/config.js").matchAll(/env\.([A-Z_]+)/g)].map((m) => m[1]));
     const keep = { old: /^[- ]/, new: /^[+ ]/ }[side];
@@ -114,9 +123,10 @@ const commands = {
       if (keep && !keep.test(raw)) continue;
       const line = keep ? raw.slice(1) : raw;
       const indent = line.search(/\S/);
-      if (indent === -1) continue;
+      if (indent === -1 || line[indent] === "#") continue; // blank or comment-only line
       if (ctxIndent !== null && indent <= ctxIndent) ctxIndent = null;
-      if (/^\s*environment:\s*$/.test(line) || /^x-[\w-]+:/.test(line)) {
+      // `environment:` alone, with an anchor (`environment: &app-env`) and/or a trailing comment
+      if (/^\s*environment:\s*(&[\w-]+\s*)?(#.*)?$/.test(line) || /^x-[\w-]+:/.test(line)) {
         ctxIndent = indent;
         continue;
       }
