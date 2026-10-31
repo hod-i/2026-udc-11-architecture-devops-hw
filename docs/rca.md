@@ -11,7 +11,8 @@
 екрані поштомата «Сервіс зайнятий» замість видачі посилки. Причина — реліз v1.8.0, який
 перейменував у `compose.yaml` змінну `DB_POOL_MAX` на `DB_POOL_SIZE`: застосунок такої змінної
 не читає і мовчки взяв пул з'єднань за замовчуванням — 4 замість 20, а на денне навантаження
-потрібно 10–13. Відкат на v1.7.3 повернув пул 20, і помилки зникли за секунди.
+потрібно 10–13. Після відкату на v1.7.3, де `DB_POOL_MAX` = 20, пул перестав упиратися в 4,
+черга зникла, а помилки припинилися за секунди.
 
 ## Хронологія (Europe/Kyiv)
 
@@ -58,9 +59,12 @@
 5. **Чому перезапуск не допоміг, а відкат допоміг.** О 14:20 перезапустили лише API на тій самій
    v1.8.0 — `restart`, а не новий деплой (доказ 18; `incident/deploys.log:8`). Змінних
    оточення контейнера в даних немає, але їхній ефект видно: пул і після перезапуску стояв
-   рівно на 4 з чергою (доказ 19a), а тайм-аути тривали (доказ 19). Відкат на v1.7.3 (докази 3a, 3b) повернув `compose.yaml` з
-   `DB_POOL_MAX: "20"` (доказ 3) — пул знову 20 (у першу ж хвилину зайнято 14, доказ 3c), черга зникла, остання 503 — за 2 с
-   до старту v1.7.3 (докази 15, 18).
+   рівно на 4 з чергою (доказ 19a), а тайм-аути тривали (доказ 19). Відкотили на v1.7.3 (докази 3a, 3b), у
+   `compose.yaml` якої `DB_POOL_MAX` = 20 (доказ 3d) і всі змінні застосунок читає (доказ 3).
+   Що після відкату запустився саме цей compose, у даних прямо не записано, але ефект видно:
+   пул перестав упиратися в 4 — зайнято до 14 з'єднань (доказ 3c), черги немає (доказ 3e), а
+   остання 503 — за 2 с до старту v1.7.3 (докази 15, 3b). Тобто пул після відкату щонайменше
+   14; що рівно 20, дані не показують.
 
 ## Докази
 
@@ -71,6 +75,8 @@
 | 3 | У `compose.yaml` v1.7.3 — старій стороні диффу релізу — застосунок читає кожну змінну | `node docs/rca-queries.mjs env-unread incident/changes/v1.8.0.diff old` | `set in incident/changes/v1.8.0.diff (old): TZ, PORT, LOG_LEVEL, DATABASE_URL, DB_POOL_MAX, DB_POOL_WAIT_MS, SMS_BASE_URL, SMS_TOKEN, SMS_RATE_PER_SEC, COURIER_BASE_URL`; `never read: none` |
 | 3a | О 14:47 відкотили саме на v1.7.3 | `node docs/rca-queries.mjs lines incident/deploys.log rollback` | `9: 2026-10-14T14:47:00+03:00   rollback  v1.7.3   olena   on-call, just in case` |
 | 3b | Після відкату API справді працював на v1.7.3 | `node docs/rca-queries.mjs group incident/logs/api-2026-10-14.jsonl "service started" ts,version 14:47 16:00` | `1 ts=2026-10-14T14:47:00.236+03:00  version=1.7.3` |
+| 3d | У `compose.yaml` v1.7.3 `DB_POOL_MAX` = 20 — і в `api`, і в `worker` | `node docs/rca-queries.mjs lines incident/changes/v1.8.0.diff "DB_POOL_MAX"` | `86: -      DB_POOL_MAX: "20"` і `106: -      DB_POOL_MAX: "20"` (рядки старої версії) |
+| 3e | Після відкату черга до пулу зникла | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_waiting 14:47 16:00` | `n=73 avg=0.00 min=0 max=0` |
 | 3c | Після відкату пул API знову перевищив 4 | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 14:47 16:00` | `n=73 avg=6.45 min=2 max=14` |
 | 4 | `config.js` не читає `DB_POOL_SIZE` і бере пул 4; з `DB_POOL_MAX` — 20 | `node --input-type=module -e "import { loadConfig } from './app/src/config.js'; console.log(loadConfig({ DB_POOL_SIZE: '20' }).dbPoolMax, loadConfig({ DB_POOL_MAX: '20' }).dbPoolMax)"` | `4 20` |
 | 5 | Під v1.8.0 зайнято рівно 4 з'єднання пулу API, весь час | `node docs/rca-queries.mjs metric incident/metrics/2026-10-14.csv db_pool_in_use 14:02 14:47` | `n=45 avg=4.00 min=4 max=4` |

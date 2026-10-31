@@ -125,6 +125,12 @@ const commands = {
       const indent = line.search(/\S/);
       if (indent === -1 || line[indent] === "#") continue; // blank or comment-only line
       if (ctxIndent !== null && indent <= ctxIndent) ctxIndent = null;
+      // one-line flow form: `environment: {NAME: "v", …}` or `environment: [NAME=v, …]`
+      const flow = /^\s*environment:\s*(?:&[\w-]+\s*)?([{[].*)$/.exec(line);
+      if (flow) {
+        for (const m of flow[1].matchAll(/[{[,]\s*["']?([A-Z][A-Z0-9_]*)["']?\s*(?=[:=,\]}])/g)) set.add(m[1]);
+        continue;
+      }
       // `environment:` alone, with an anchor (`environment: &app-env`) and/or a trailing comment
       if (/^\s*environment:\s*(&[\w-]+\s*)?(#.*)?$/.test(line) || /^x-[\w-]+:/.test(line)) {
         ctxIndent = indent;
